@@ -1,10 +1,5 @@
 {
-  "name": "cloudbeds-relay",
+  "name": "cloudbeds-reservation-api",
   "version": "1.0.0",
-  "main": "index.js",
-  "type": "module",
-  "scripts": {
-    "start": "node index.js"
-  },
-  "dependencies": {}
+  "type": "module"
 }
