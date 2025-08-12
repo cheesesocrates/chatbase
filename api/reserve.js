@@ -1,5 +1,3 @@
-reserve.js
-
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
     return res.status(405).json({ success: false, message: 'Method Not Allowed' });
@@ -22,3 +20,4 @@ export default async function handler(req, res) {
     res.status(500).json({ success: false, message: err.message });
   }
 }
+
