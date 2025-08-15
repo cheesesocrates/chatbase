@@ -1,115 +1,156 @@
-// api/reserve.js
-// Vercel Node serverless function (CommonJS)
+// pages/api/reserve.js
+// Next.js (Vercel) API route — Node 18+
+// PURPOSE: Relay bookings from your bot/frontend to Cloudbeds postReservation
+// FORMAT: multipart/form-data (the format Cloudbeds support validated)
 
-const axios = require("axios");
-const FormData = require("form-data");
+// ENV (set in Vercel):
+//   CLOUDBEDS_API_KEY   -> your cbat_... key  (required)
 
-function cors(res) {
-  res.setHeader("Access-Control-Allow-Origin", process.env.ALLOWED_ORIGIN || "*");
-  res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type,Authorization,X-Chatbase-Token");
-}
-
-module.exports = async (req, res) => {
-  cors(res);
-
-  if (req.method === "OPTIONS") {
-    return res.status(204).end();
+export default async function handler(req, res) {
+  if (req.method === 'GET') {
+    return res.status(200).json({ ok: true, message: 'Cloudbeds reserve relay live' });
   }
-  if (req.method !== "POST") {
-    return res.status(405).json({ success: false, error: "Use POST." });
+  if (req.method !== 'POST') {
+    return res.status(405).json({ success: false, message: 'Method Not Allowed' });
   }
 
   try {
-    const ct = (req.headers["content-type"] || "").toLowerCase();
-    if (!ct.includes("application/json")) {
-      return res.status(415).json({ success: false, error: "Send JSON (application/json)." });
+    const API_KEY = process.env.CLOUDBEDS_API_KEY || process.env.CLOUDBEDS_CREDENTIAL;
+    if (!API_KEY) {
+      return res.status(500).json({ success: false, message: 'Missing CLOUDBEDS_API_KEY env' });
     }
 
-    // Vercel may give parsed object OR raw string depending on body parser.
-    const body = typeof req.body === "string" ? JSON.parse(req.body) : req.body;
+    // Accept flexible input (single-room or rooms[])
+    const {
+      // stay / property
+      propertyID,
+      startDate, endDate, checkInDate, checkOutDate,
 
-    // ---- Minimal validation (clear messages before we call Cloudbeds) ----
+      // guest
+      guestFirstName, guestLastName, guestEmail, guestPhone, guestCountry, guestZip,
+
+      // payment
+      paymentMethod = 'cash',
+
+      // single-room legacy fields (optional)
+      roomTypeID, roomID, rateID, quantity, numAdults, numChildren,
+
+      // preferred: array of rooms
+      // rooms: [{ roomTypeID, roomID?, roomRateID? (or rateID), quantity, adults, children }]
+      rooms,
+    } = req.body || {};
+
+    const start = startDate || checkInDate;
+    const end   = endDate   || checkOutDate;
+
+    // ---- Normalize rooms to an array of objects that match Cloudbeds multipart schema ----
+    let normalizedRooms = [];
+    if (Array.isArray(rooms) && rooms.length) {
+      normalizedRooms = rooms.map((r) => ({
+        roomTypeID : mustStr(r.roomTypeID),
+        roomID     : optStr(r.roomID),
+        roomRateID : optStr(r.roomRateID ?? r.rateID),
+        quantity   : numOr(r.quantity, 1),
+        adults     : numOr(r.adults ?? r.numAdults, 2),
+        children   : numOr(r.children ?? r.numChildren, 0),
+      }));
+    } else if (roomTypeID || quantity || numAdults || numChildren || rateID) {
+      normalizedRooms = [{
+        roomTypeID : mustStr(roomTypeID),
+        roomID     : optStr(roomID),
+        roomRateID : optStr(rateID),
+        quantity   : numOr(quantity, 1),
+        adults     : numOr(numAdults, 2),
+        children   : numOr(numChildren, 0),
+      }];
+    }
+
+    // ---- Validation (keep it practical; Cloudbeds will also validate) ----
     const missing = [];
-    if (!body?.propertyID) missing.push("propertyID");
-    if (!body?.startDate) missing.push("startDate");
-    if (!body?.endDate) missing.push("endDate");
-    if (!body?.paymentMethod) missing.push("paymentMethod");
-    if (!body?.guest?.firstName) missing.push("guest.firstName");
-    if (!body?.guest?.lastName) missing.push("guest.lastName");
-    if (!body?.guest?.email) missing.push("guest.email");
-    if (!body?.guest?.country) missing.push("guest.country");
-    if (!Array.isArray(body?.rooms) || body.rooms.length === 0) missing.push("rooms[0]");
+    if (!propertyID)     missing.push('propertyID');
+    if (!start)          missing.push('startDate');
+    if (!end)            missing.push('endDate');
+    if (!guestFirstName) missing.push('guestFirstName');
+    if (!guestLastName)  missing.push('guestLastName');
+    if (!guestEmail)     missing.push('guestEmail');
+    if (!guestCountry)   missing.push('guestCountry');
+    if (!normalizedRooms.length) missing.push('rooms[0]');
+    normalizedRooms.forEach((r, i) => {
+      if (!r.roomTypeID) missing.push(`rooms[${i}].roomTypeID`);
+      if (r.quantity < 1) missing.push(`rooms[${i}].quantity`);
+      if (r.adults < 1)   missing.push(`rooms[${i}].adults`);
+      if (r.children == null) missing.push(`rooms[${i}].children`);
+    });
     if (missing.length) {
-      return res.status(400).json({ success: false, error: `Missing required fields: ${missing.join(", ")}` });
+      return res.status(400).json({ success: false, message: `Missing required fields: ${missing.join(', ')}` });
     }
 
-    const dateRe = /^\d{4}-\d{2}-\d{2}$/;
-    if (!dateRe.test(body.startDate) || !dateRe.test(body.endDate)) {
-      return res.status(400).json({ success: false, error: "Dates must be YYYY-MM-DD." });
-    }
-    if (new Date(body.endDate) <= new Date(body.startDate)) {
-      return res.status(400).json({ success: false, error: "endDate must be after startDate." });
-    }
-
-    // ---- Build multipart/form-data exactly like your working curl ----
+    // ---- Build multipart/form-data exactly like Cloudbeds support sample ----
+    // Node 18+ has global FormData/Blob via undici; DO NOT set Content-Type manually.
     const form = new FormData();
-    form.append("startDate", String(body.startDate));
-    form.append("endDate", String(body.endDate));
-    form.append("guestFirstName", String(body.guest.firstName));
-    form.append("guestLastName", String(body.guest.lastName));
-    form.append("guestCountry", String(body.guest.country));
-    if (body.guest.zip) form.append("guestZip", String(body.guest.zip));
-    form.append("guestEmail", String(body.guest.email));
-    if (body.guest.phone) form.append("guestPhone", String(body.guest.phone));
-    form.append("paymentMethod", String(body.paymentMethod));
-    form.append("propertyID", String(body.propertyID));
+    form.set('startDate', start);
+    form.set('endDate', end);
+    form.set('guestFirstName', guestFirstName);
+    form.set('guestLastName',  guestLastName);
+    form.set('guestCountry',   guestCountry);
+    if (guestZip)   form.set('guestZip', guestZip);
+    form.set('guestEmail',     guestEmail);
+    if (guestPhone) form.set('guestPhone', guestPhone);
+    form.set('paymentMethod',  String(paymentMethod));
+    form.set('propertyID',     String(propertyID));
 
-    body.rooms.forEach((r, i) => {
-      const qty = r.quantity ?? 1;
-      form.append(`rooms[${i}][roomTypeID]`, String(r.roomTypeID));
-      if (r.roomID) form.append(`rooms[${i}][roomID]`, String(r.roomID));
-      form.append(`rooms[${i}][quantity]`, String(qty));
-      if (r.roomRateID) form.append(`rooms[${i}][roomRateID]`, String(r.roomRateID));
+    normalizedRooms.forEach((r, i) => {
+      form.set(`rooms[${i}][roomTypeID]`, r.roomTypeID);
+      if (r.roomID)     form.set(`rooms[${i}][roomID]`, r.roomID);          // optional specific unit (e.g., "331133-1")
+      form.set(`rooms[${i}][quantity]`, String(r.quantity));
+      if (r.roomRateID) form.set(`rooms[${i}][roomRateID]`, r.roomRateID);  // rate plan id
 
-      const a = Number(r.adults);
-      if (!Number.isFinite(a) || a <= 0) {
-        throw new Error(`rooms[${i}].adults must be a positive number (Cloudbeds requires adults[]).`);
-      }
-      form.append(`adults[${i}][roomTypeID]`, String(r.roomTypeID));
-      if (r.roomID) form.append(`adults[${i}][roomID]`, String(r.roomID));
-      form.append(`adults[${i}][quantity]`, String(a));
+      // Occupancy blocks aligned to the same index, as per support example
+      form.set(`adults[${i}][roomTypeID]`, r.roomTypeID);
+      if (r.roomID) form.set(`adults[${i}][roomID]`, r.roomID);
+      form.set(`adults[${i}][quantity]`, String(r.adults));
 
-      const c = Number(r.children ?? 0);
-      if (c > 0) {
-        form.append(`children[${i}][roomTypeID]`, String(r.roomTypeID));
-        if (r.roomID) form.append(`children[${i}][roomID]`, String(r.roomID));
-        form.append(`children[${i}][quantity]`, String(c));
+      form.set(`children[${i}][roomTypeID]`, r.roomTypeID);
+      if (r.roomID) form.set(`children[${i}][roomID]`, r.roomID);
+      form.set(`children[${i}][quantity]`, String(r.children));
+    });
+
+    const endpoint = 'https://api.cloudbeds.com/api/v1.3/postReservation';
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'x-api-key': API_KEY }, // do NOT set Content-Type; fetch adds the multipart boundary
+      body: form
+    });
+
+    const raw = await response.text();
+    let data;
+    try { data = JSON.parse(raw); } catch { data = { raw }; }
+
+    // Pass Cloudbeds’ response through (status + body), and a light preview of what we sent
+    return res.status(response.status).json({
+      ...data,
+      _endpoint: endpoint,
+      _sentPreview: {
+        propertyID,
+        startDate: start, endDate: end,
+        guestFirstName, guestLastName, guestEmail, guestCountry,
+        guestZip: guestZip || undefined, guestPhone: guestPhone || undefined,
+        paymentMethod,
+        rooms: normalizedRooms
+          .map(({ roomTypeID, roomID, roomRateID, quantity, adults, children }) =>
+            ({ roomTypeID, roomID, roomRateID, quantity, adults, children }))
       }
     });
 
-    const url = `${process.env.CLOUDBEDS_BASE_URL || "https://api.cloudbeds.com/api/v1.3"}/postReservation`;
-
-    const cbRes = await axios.post(url, form, {
-      headers: {
-        ...form.getHeaders(),
-        "x-api-key": process.env.CLOUDBEDS_API_KEY || "",
-        // If your account uses OAuth instead of API key, swap the header:
-        // Authorization: `Bearer ${process.env.CLOUDBEDS_OAUTH_TOKEN}`
-      },
-      validateStatus: () => true, // let us handle non-2xx ourselves
-    });
-
-    const data = cbRes.data;
-
-    if (cbRes.status < 200 || cbRes.status >= 300 || data?.success === false) {
-      const errorMsg =
-        data?.message || data?.error || (process.env.RESERVATION_DEBUG ? JSON.stringify(data) : "Cloudbeds returned an error.");
-      return res.status(cbRes.status || 400).json({ success: false, error: errorMsg, cloudbeds: data });
-    }
-
-    return res.status(200).json({ success: true, data });
   } catch (err) {
-    return res.status(500).json({ success: false, error: err?.message || "Unexpected server error." });
+    return res.status(500).json({ success: false, message: err.message });
   }
-};
+}
+
+// ---- helpers ----
+function mustStr(v) { return (v == null ? '' : String(v)); }
+function optStr(v)  { return (v == null || v === '' ? undefined : String(v)); }
+function numOr(v, d) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : d;
+}
