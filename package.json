@@ -2,5 +2,8 @@
   "name": "chatbase",
   "version": "1.0.0",
   "type": "module",
-  "dependencies": {}
+  "dependencies": {
+  "axios": "^1.7.2",
+  "form-data": "^4.0.0"
+}
 }
