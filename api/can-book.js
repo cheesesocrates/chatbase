@@ -1,7 +1,4 @@
-// api/can-book.js
-// Vercel Serverless Function (root /api style)
-// Returns { success, canBook, reason, details } for the given dates/party.
-
+// api/can-book.js  (ESM; works with "type":"module")
 function str(v){ return (v==null?'':String(v).trim()); }
 function toInt(v,d){ const n=Number(v); return Number.isFinite(n)?n:d; }
 function ymd(v){ if(!v) return ''; const m=String(v).match(/^(\d{4}-\d{2}-\d{2})/); return m?m[1]:''; }
@@ -14,7 +11,7 @@ function findTypesArray(payload){
   return null;
 }
 
-module.exports = async (req, res) => {
+export default async function handler(req, res) {
   if (req.method !== 'GET') {
     return res.status(405).json({ success: false, message: 'Use GET.' });
   }
@@ -108,26 +105,3 @@ module.exports = async (req, res) => {
     });
 
     const party = adults + children;
-    let match;
-    if (roomTypeID) {
-      match = normalized.find(x => x.roomTypeID === roomTypeID &&
-        x.available >= quantity &&
-        (x.maxGuests == null || party <= x.maxGuests * quantity));
-    } else {
-      match = normalized.find(x =>
-        x.available >= quantity &&
-        (x.maxGuests == null || party <= x.maxGuests * quantity));
-    }
-
-    return res.status(200).json({
-      success: true,
-      canBook: Boolean(!!match),
-      reason: match ? 'Available.' : 'No room types meet quantity/capacity for these dates.',
-      details: { adults, children, quantity, match },
-      _endpoint: usedUrl
-    });
-
-  } catch (err) {
-    return res.status(500).json({ success:false, message: err?.message || 'Unexpected server error.' });
-  }
-};
