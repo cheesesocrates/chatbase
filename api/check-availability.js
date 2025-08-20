@@ -8,8 +8,8 @@ function toInt(v,d){ const n=Number(v); return Number.isFinite(n)?n:d; }
 export default async function handler(req, res) {
   if (req.method !== "GET") return res.status(405).json({ success:false, message:"Use GET." });
 
-  const TOKEN = process.env.CLOUDBEDS_API_TOKEN; // <-- set in Vercel
-  if (!TOKEN) return res.status(500).json({ success:false, message:"Missing CLOUDBEDS_API_TOKEN" });
+  const TOKEN = process.env.CLOUDBEDS_API_KEY; // <-- set in Vercel
+  if (!TOKEN) return res.status(500).json({ success:false, message:"Missing CLOUDBEDS_API_KEY" });
 
   const startDate  = ymd(req.query.startDate);
   const endDate    = ymd(req.query.endDate);
