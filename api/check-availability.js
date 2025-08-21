@@ -1,105 +1,57 @@
-// api/check-availability.js
-// Answer: is ANY room type available between startDate and endDate?
-// Auth: prefers OAuth Bearer (CLOUDBEDS_API_KEY). Falls back to x-api-key if not set.
-// Output includes a per-type summary so you can verify the logic.
-
-function ymd(v){ if(!v) return ""; const m=String(v).match(/^(\d{4}-\d{2}-\d{2})/); return m?m[1]:""; }
-function toNum(v, d = 0){ const n = Number(v); return Number.isFinite(n) ? n : d; }
-
+// Vercel serverless function: GET /api/get-availability
 export default async function handler(req, res) {
-  if (req.method !== "GET") return res.status(405).json({ success:false, message:"Use GET." });
-
   try {
-    const startDate  = ymd(req.query.startDate);
-    const endDate    = ymd(req.query.endDate);
-    const propertyID = (req.query.propertyID ?? "").toString().trim();
-    const adults     = toNum(req.query.adults ?? req.query.numAdults, 2);
-    const children   = toNum(req.query.children ?? req.query.numChildren, 0);
-    const debug      = String(req.query.debug ?? "") === "1";
+    // Accept GET or POST (Chatbase may call either)
+    const m = req.method.toUpperCase();
+    const params = m === 'GET' ? req.query : (req.body || {});
 
-    const missing = [];
-    if (!startDate) missing.push("startDate");
-    if (!endDate)   missing.push("endDate");
-    if (missing.length) {
-      return res.status(400).json({ success:false, available:false, reason:`Missing: ${missing.join(", ")}` });
-    }
-    if (new Date(endDate) <= new Date(startDate)) {
-      return res.status(400).json({ success:false, available:false, reason:"endDate must be after startDate" });
-    }
+    const {
+      startDate,
+      endDate,
+      propertyID = '198424',
+      adults = '2',
+      children = '0'
+    } = params;
 
-    const BEARER = process.env.CLOUDBEDS_API_KEY;
-    const APIKEY = process.env.CLOUDBEDS_API_KEY;
-    const headers = BEARER
-      ? { Authorization: `Bearer ${BEARER}` }
-      : (APIKEY ? { "x-api-key": APIKEY } : null);
-
-    if (!headers) {
-      return res.status(500).json({
-        success:false, available:false,
-        reason:"No credentials set. Add CLOUDBEDS_API_KEY (preferred) or CLOUDBEDS_API_KEY in Vercel env."
+    if (!startDate || !endDate) {
+      return res.status(400).json({
+        success: false,
+        message: "startDate and endDate are required (YYYY-MM-DD)."
       });
     }
 
-    // Build the EXACT endpoint Cloudbeds gave you (v1.2 + CamelCase)
-    const qs = new URLSearchParams({ startDate, endDate });
-    if (propertyID) qs.set("propertyID", propertyID);
-    if (!qs.has("adults"))   qs.set("adults", String(adults));
-    if (!qs.has("children")) qs.set("children", String(children));
+    // Build Cloudbeds URL
+    const url = new URL('https://api.cloudbeds.com/api/v1.3/getAvailableRoomTypes');
+    url.searchParams.set('propertyID', propertyID);
+    url.searchParams.set('startDate', startDate);
+    url.searchParams.set('endDate', endDate);
+    if (adults)   url.searchParams.set('adults', adults);
+    if (children) url.searchParams.set('children', children);
 
-    const url = `https://api.cloudbeds.com/api/v1.2/getAvailableRoomTypes?${qs.toString()}`;
-
-    const resp = await fetch(url, { headers });
-    const raw = await resp.text();
-    let payload; try { payload = JSON.parse(raw); } catch { payload = { raw }; }
-
-    if (!resp.ok || payload?.success === false) {
-      return res.status(resp.status || 400).json({
-        success:false, available:false,
-        reason: payload?.message || payload?.error || "Cloudbeds error",
-        cloudbeds: payload, _endpoint: url
-      });
-    }
-
-    // Find the list the API returned (field name varies by account)
-    const list = Array.isArray(payload?.data) ? payload.data
-               : Array.isArray(payload?.availableRoomTypes) ? payload.availableRoomTypes
-               : Array.isArray(payload?.roomTypes) ? payload.roomTypes
-               : null;
-
-    if (!Array.isArray(list)) {
-      return res.status(200).json({
-        success:true, available:false,
-        reason:"No room-types array in Cloudbeds response.",
-        _endpoint:url, ...(debug ? { raw: payload } : {})
-      });
-    }
-
-    // Compute counts explicitly and sum them
-    const summary = list.map(rt => {
-      const count = toNum(
-        rt?.availableRooms ?? rt?.availability ?? rt?.remainingRooms ?? rt?.available ?? rt?.qty,
-        0
-      );
-      return {
-        roomTypeID: String(rt.roomTypeID ?? rt.id ?? ""),
-        roomTypeName: String(rt.roomTypeName ?? rt.name ?? ""),
-        availableRooms: count
-      };
+    // Call Cloudbeds
+    const r = await fetch(url.toString(), {
+      headers: {
+        Authorization: `Bearer ${process.env.CLOUDBEDS_API_KEY}`
+      }
     });
 
-    const totalAvailable = summary.reduce((sum, s) => sum + Math.max(0, s.availableRooms), 0);
-    const available = totalAvailable > 0; // <= THIS is the decision (not inverted)
+    const data = await r.json();
 
-    return res.status(200).json({
-      success:true,
-      available,
-      reason: available ? "At least one room type has availability." : "All room types show 0 available rooms.",
-      totals: { totalAvailable },
-      summary,          // you can eyeball this to verify the counts
-      _endpoint:url
-    });
+    // Helpful hint for this specific property (optional but nice)
+    // If nothing returned and user asked < 2 nights or touches 10/15–10/16 days, tell them why.
+    const nights =
+      (new Date(endDate).getTime() - new Date(startDate).getTime()) / 86400000;
 
-  } catch (e) {
-    return res.status(500).json({ success:false, available:false, reason:e?.message || "Unexpected error" });
+    const hint = (!data?.data?.length) ? {
+      note: "No rooms for the requested window.",
+      suggestions: [
+        "Ensure stay is at least 2 nights.",
+        "Try check-in on or after 2025-10-17 (earlier days may have no daily rates)."
+      ]
+    } : undefined;
+
+    return res.status(r.ok ? 200 : r.status).json({ ...data, hint });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
   }
 }
