@@ -1,8 +1,4 @@
-// pages/api/reserve.js
-// Next.js (Vercel) API route — Node 18+
-// PURPOSE: Relay bookings from your bot/frontend to Cloudbeds postReservation
-// FORMAT: multipart/form-data (Cloudbeds standard)
-
+// api/reserve.js (Vercel/Node 18+)
 export default async function handler(req, res) {
   if (req.method === 'GET') {
     return res.status(200).json({ ok: true, message: 'Cloudbeds reserve relay live' });
@@ -28,7 +24,7 @@ export default async function handler(req, res) {
       // payment
       paymentMethod = 'cash',
 
-      // single-room legacy fields
+      // single-room fields (optional)
       roomTypeID, roomID, rateID, quantity, numAdults, numChildren,
 
       // or array of rooms
@@ -42,7 +38,6 @@ export default async function handler(req, res) {
       const d = new Date(v);
       return isNaN(+d) ? '' : d.toISOString().slice(0,10);
     };
-
     const start = normalizeDate(startDate || checkInDate);
     const end   = normalizeDate(endDate   || checkOutDate);
 
@@ -88,25 +83,37 @@ export default async function handler(req, res) {
     }
 
     // --- build multipart/form-data ---
+    // Node 18+: global FormData/Blob exists (undici). Don't set Content-Type manually.
     const form = new FormData();
     form.set('propertyID', String(propertyID));
     form.set('startDate', start);
     form.set('endDate', end);
     form.set('guestFirstName', guestFirstName);
-    form.set('guestLastName', guestLastName);
-    form.set('guestEmail', guestEmail);
-    form.set('guestCountry', guestCountry);
+    form.set('guestLastName',  guestLastName);
+    form.set('guestEmail',     guestEmail);
+    form.set('guestCountry',   guestCountry);
     if (guestZip)   form.set('guestZip', guestZip);
     if (guestPhone) form.set('guestPhone', guestPhone);
     form.set('paymentMethod', String(paymentMethod));
 
     normalizedRooms.forEach((r, i) => {
+      // rooms[]
       form.set(`rooms[${i}][roomTypeID]`, r.roomTypeID);
       if (r.roomID) form.set(`rooms[${i}][roomID]`, r.roomID);
       form.set(`rooms[${i}][quantity]`, String(r.quantity));
-      form.set(`rooms[${i}][rateID]`, r.rateID);   // ✅ correct field name
-      form.set(`rooms[${i}][adults]`, String(r.adults));
+      form.set(`rooms[${i}][rateID]`, r.rateID);
+      // include occupancy inside rooms (harmless)
+      form.set(`rooms[${i}][adults]`,   String(r.adults));
       form.set(`rooms[${i}][children]`, String(r.children));
+
+      // REQUIRED by Cloudbeds: top-level adults[] / children[] blocks
+      form.set(`adults[${i}][roomTypeID]`, r.roomTypeID);
+      if (r.roomID) form.set(`adults[${i}][roomID]`, r.roomID);
+      form.set(`adults[${i}][quantity]`, String(r.adults));
+
+      form.set(`children[${i}][roomTypeID]`, r.roomTypeID);
+      if (r.roomID) form.set(`children[${i}][roomID]`, r.roomID);
+      form.set(`children[${i}][quantity]`, String(r.children));
     });
 
     const endpoint = 'https://api.cloudbeds.com/api/v1.3/postReservation';
@@ -125,20 +132,4 @@ export default async function handler(req, res) {
       _sentPreview: {
         propertyID,
         startDate: start, endDate: end,
-        guestFirstName, guestLastName, guestEmail, guestCountry,
-        rooms: normalizedRooms
-      }
-    });
-
-  } catch (err) {
-    return res.status(500).json({ success: false, message: err.message });
-  }
-}
-
-// --- helpers ---
-function mustStr(v) { return (v == null ? '' : String(v)); }
-function optStr(v)  { return (v == null || v === '' ? undefined : String(v)); }
-function numOr(v, d) {
-  const n = Number(v);
-  return Number.isFinite(n) ? n : d;
-}
+        guestFirstName, guestLastName, guestEmail
