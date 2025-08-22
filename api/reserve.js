@@ -1,45 +1,27 @@
 // api/reserve.js — Vercel Serverless Function (Node 18+)
-// Receives JSON, relays to Cloudbeds postReservation as application/x-www-form-urlencoded
-
 export default async function handler(req, res) {
-  if (req.method === 'GET') {
-    return res.status(200).json({ ok: true, message: 'Cloudbeds reserve relay live' });
-  }
-  if (req.method !== 'POST') {
-    return res.status(405).json({ success: false, message: 'Method Not Allowed' });
-  }
+  if (req.method === 'GET') return res.status(200).json({ ok: true, message: 'Cloudbeds reserve relay live' });
+  if (req.method !== 'POST') return res.status(405).json({ success: false, message: 'Method Not Allowed' });
 
   try {
     const API_KEY = process.env.CLOUDBEDS_API_KEY;
-    if (!API_KEY) {
-      return res.status(500).json({ success: false, message: 'Missing CLOUDBEDS_API_KEY env' });
-    }
+    if (!API_KEY) return res.status(500).json({ success: false, message: 'Missing CLOUDBEDS_API_KEY env' });
 
     const {
-      // stay / property
       propertyID,
       startDate, endDate, checkInDate, checkOutDate,
-
-      // guest
       guestFirstName, guestLastName, guestEmail, guestPhone, guestCountry, guestZip,
-
-      // payment
       paymentMethod = 'cash',
-
-      // single-room convenience fields (optional)
       roomTypeID, roomID, rateID, quantity, numAdults, numChildren,
-
-      // preferred: array of rooms
-      // rooms: [{ roomTypeID, roomID?, rateID, quantity, adults, children }]
-      rooms,
+      rooms
     } = req.body || {};
 
-    // Normalize ISO → YYYY-MM-DD
+    // ISO -> YYYY-MM-DD
     const normalizeDate = (v) => {
       if (!v) return '';
-      if (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}/.test(v)) return v.slice(0, 10);
+      if (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}/.test(v)) return v.slice(0,10);
       const d = new Date(v);
-      return Number.isNaN(+d) ? '' : d.toISOString().slice(0, 10);
+      return Number.isNaN(+d) ? '' : d.toISOString().slice(0,10);
     };
     const start = normalizeDate(startDate || checkInDate);
     const end   = normalizeDate(endDate   || checkOutDate);
@@ -48,9 +30,9 @@ export default async function handler(req, res) {
     let normalizedRooms = [];
     if (Array.isArray(rooms) && rooms.length) {
       normalizedRooms = rooms.map((r) => ({
-        roomTypeID: mustStr(r.roomTypeID),
+        roomTypeID: mustStr(r.roomTypeID),   // may be "Duplex" or "331133"
         roomID:     optStr(r.roomID),
-        rateID:     mustStr(r.rateID || r.roomRateID),
+        rateID:     mustStr(r.rateID || r.roomRateID), // may be missing/wrong
         quantity:   numOr(r.quantity, 1),
         adults:     numOr(r.adults ?? r.numAdults, 2),
         children:   numOr(r.children ?? r.numChildren, 0),
@@ -66,7 +48,7 @@ export default async function handler(req, res) {
       }];
     }
 
-    // Validate
+    // Basic requireds (we’ll try to auto-fix IDs after this)
     const missing = [];
     if (!propertyID)     missing.push('propertyID');
     if (!start)          missing.push('startDate');
@@ -76,16 +58,66 @@ export default async function handler(req, res) {
     if (!guestEmail)     missing.push('guestEmail');
     if (!guestCountry)   missing.push('guestCountry');
     if (!normalizedRooms.length) missing.push('rooms[0]');
-    normalizedRooms.forEach((r, i) => {
-      if (!r.roomTypeID) missing.push(`rooms[${i}].roomTypeID`);
-      if (!r.rateID)     missing.push(`rooms[${i}].rateID`);
-      if (r.quantity < 1) missing.push(`rooms[${i}].quantity`);
-    });
-    if (missing.length) {
-      return res.status(400).json({ success: false, message: `Missing required fields: ${missing.join(', ')}` });
+    if (missing.length)  return res.status(400).json({ success: false, message: `Missing required fields: ${missing.join(', ')}` });
+
+    // --- Auto-fix roomTypeID names and missing/wrong rateID via availability lookup ---
+    for (let i = 0; i < normalizedRooms.length; i++) {
+      const r = normalizedRooms[i];
+      const isNumericId = /^\d+$/.test(r.roomTypeID);
+      const adults = Math.max(1, Number(r.adults || 1));
+      const children = Math.max(0, Number(r.children || 0));
+
+      // Call availability for these dates/occupancy
+      const avURL = new URL('https://api.cloudbeds.com/api/v1.3/getAvailableRoomTypes');
+      avURL.searchParams.set('propertyID', String(propertyID));
+      avURL.searchParams.set('startDate', start);
+      avURL.searchParams.set('endDate', end);
+      avURL.searchParams.set('adults', String(adults));
+      avURL.searchParams.set('children', String(children));
+
+      const avResp = await fetch(avURL.toString(), { headers: { 'x-api-key': API_KEY } });
+      const av = await avResp.json();
+
+      const list = av?.data?.[0]?.propertyRooms || [];
+      // Try to find by numeric ID or by name when a label like "Duplex" was provided
+      let match = null;
+      if (isNumericId) {
+        match = list.find(x => String(x.roomTypeID) === String(r.roomTypeID));
+      } else {
+        match = list.find(x => (x.roomTypeName || '').toLowerCase() === String(r.roomTypeID).toLowerCase());
+      }
+
+      if (!match) {
+        return res.status(400).json({
+          success: false,
+          message: `Room type not available for these dates/occupancy: ${r.roomTypeID}`,
+          hint: 'Use the roomTypeID and roomRateID from getAvailableRoomTypes for the chosen dates.'
+        });
+      }
+
+      // Fill numeric roomTypeID if a name was sent
+      r.roomTypeID = String(match.roomTypeID);
+
+      // Fill rateID if missing or not numeric
+      const hasValidRate = /^\d+$/.test(r.rateID);
+      const derivedRateId = String(match.roomRateID || match.rateID || '');
+      if (!hasValidRate || !derivedRateId) {
+        r.rateID = derivedRateId;
+      }
     }
 
-    // Build application/x-www-form-urlencoded body
+    // Final validation after auto-fix
+    const postMissing = [];
+    normalizedRooms.forEach((r, i) => {
+      if (!/^\d+$/.test(r.roomTypeID)) postMissing.push(`rooms[${i}].roomTypeID (numeric)`);
+      if (!/^\d+$/.test(r.rateID))     postMissing.push(`rooms[${i}].rateID (numeric)`);
+      if (r.quantity < 1)              postMissing.push(`rooms[${i}].quantity`);
+    });
+    if (postMissing.length) {
+      return res.status(400).json({ success: false, message: `Missing/invalid fields: ${postMissing.join(', ')}` });
+    }
+
+    // Build x-www-form-urlencoded payload
     const params = new URLSearchParams();
     params.set('propertyID', String(propertyID));
     params.set('startDate', start);
@@ -99,13 +131,12 @@ export default async function handler(req, res) {
     params.set('paymentMethod', String(paymentMethod));
 
     normalizedRooms.forEach((r, i) => {
-      // rooms[i][...]
       params.set(`rooms[${i}][roomTypeID]`, r.roomTypeID);
       if (r.roomID) params.set(`rooms[${i}][roomID]`, r.roomID);
       params.set(`rooms[${i}][quantity]`, String(r.quantity));
       params.set(`rooms[${i}][rateID]`,   r.rateID);
 
-      // REQUIRED top-level occupancy blocks
+      // Required top-level occupancy arrays
       params.set(`adults[${i}][roomTypeID]`, r.roomTypeID);
       if (r.roomID) params.set(`adults[${i}][roomID]`, r.roomID);
       params.set(`adults[${i}][quantity]`, String(r.adults));
@@ -118,10 +149,7 @@ export default async function handler(req, res) {
     const endpoint = 'https://api.cloudbeds.com/api/v1.3/postReservation';
     const response = await fetch(endpoint, {
       method: 'POST',
-      headers: {
-        'x-api-key': API_KEY,
-        'Content-Type': 'application/x-www-form-urlencoded'
-      },
+      headers: { 'x-api-key': API_KEY, 'Content-Type': 'application/x-www-form-urlencoded' },
       body: params.toString()
     });
 
@@ -140,7 +168,6 @@ export default async function handler(req, res) {
     });
 
   } catch (err) {
-    // Surface the error so you can see it in the response & Vercel logs
     return res.status(500).json({ success: false, message: err.message, stack: err.stack });
   }
 }
