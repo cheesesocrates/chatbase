@@ -1,4 +1,6 @@
-// api/reserve.js (Vercel/Node 18+)
+// api/reserve.js — Vercel Serverless Function (Node 18+)
+// Receives JSON, relays to Cloudbeds postReservation as application/x-www-form-urlencoded
+
 export default async function handler(req, res) {
   if (req.method === 'GET') {
     return res.status(200).json({ ok: true, message: 'Cloudbeds reserve relay live' });
@@ -24,46 +26,47 @@ export default async function handler(req, res) {
       // payment
       paymentMethod = 'cash',
 
-      // single-room fields (optional)
+      // single-room convenience fields (optional)
       roomTypeID, roomID, rateID, quantity, numAdults, numChildren,
 
-      // or array of rooms
+      // preferred: array of rooms
+      // rooms: [{ roomTypeID, roomID?, rateID, quantity, adults, children }]
       rooms,
     } = req.body || {};
 
-    // --- normalize ISO → YYYY-MM-DD ---
+    // Normalize ISO → YYYY-MM-DD
     const normalizeDate = (v) => {
       if (!v) return '';
-      if (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}/.test(v)) return v.slice(0,10);
+      if (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}/.test(v)) return v.slice(0, 10);
       const d = new Date(v);
-      return isNaN(+d) ? '' : d.toISOString().slice(0,10);
+      return Number.isNaN(+d) ? '' : d.toISOString().slice(0, 10);
     };
     const start = normalizeDate(startDate || checkInDate);
     const end   = normalizeDate(endDate   || checkOutDate);
 
-    // --- normalize rooms ---
+    // Normalize rooms
     let normalizedRooms = [];
     if (Array.isArray(rooms) && rooms.length) {
       normalizedRooms = rooms.map((r) => ({
-        roomTypeID : mustStr(r.roomTypeID),
-        roomID     : optStr(r.roomID),
-        rateID     : mustStr(r.rateID || r.roomRateID),
-        quantity   : numOr(r.quantity, 1),
-        adults     : numOr(r.adults ?? r.numAdults, 2),
-        children   : numOr(r.children ?? r.numChildren, 0),
+        roomTypeID: mustStr(r.roomTypeID),
+        roomID:     optStr(r.roomID),
+        rateID:     mustStr(r.rateID || r.roomRateID),
+        quantity:   numOr(r.quantity, 1),
+        adults:     numOr(r.adults ?? r.numAdults, 2),
+        children:   numOr(r.children ?? r.numChildren, 0),
       }));
     } else if (roomTypeID || rateID) {
       normalizedRooms = [{
-        roomTypeID : mustStr(roomTypeID),
-        roomID     : optStr(roomID),
-        rateID     : mustStr(rateID),
-        quantity   : numOr(quantity, 1),
-        adults     : numOr(numAdults, 2),
-        children   : numOr(numChildren, 0),
+        roomTypeID: mustStr(roomTypeID),
+        roomID:     optStr(roomID),
+        rateID:     mustStr(rateID),
+        quantity:   numOr(quantity, 1),
+        adults:     numOr(numAdults, 2),
+        children:   numOr(numChildren, 0),
       }];
     }
 
-    // --- required fields ---
+    // Validate
     const missing = [];
     if (!propertyID)     missing.push('propertyID');
     if (!start)          missing.push('startDate');
@@ -82,45 +85,44 @@ export default async function handler(req, res) {
       return res.status(400).json({ success: false, message: `Missing required fields: ${missing.join(', ')}` });
     }
 
-    // --- build multipart/form-data ---
-    // Node 18+: global FormData/Blob exists (undici). Don't set Content-Type manually.
-    const form = new FormData();
-    form.set('propertyID', String(propertyID));
-    form.set('startDate', start);
-    form.set('endDate', end);
-    form.set('guestFirstName', guestFirstName);
-    form.set('guestLastName',  guestLastName);
-    form.set('guestEmail',     guestEmail);
-    form.set('guestCountry',   guestCountry);
-    if (guestZip)   form.set('guestZip', guestZip);
-    if (guestPhone) form.set('guestPhone', guestPhone);
-    form.set('paymentMethod', String(paymentMethod));
+    // Build application/x-www-form-urlencoded body
+    const params = new URLSearchParams();
+    params.set('propertyID', String(propertyID));
+    params.set('startDate', start);
+    params.set('endDate',   end);
+    params.set('guestFirstName', guestFirstName);
+    params.set('guestLastName',  guestLastName);
+    params.set('guestEmail',     guestEmail);
+    params.set('guestCountry',   guestCountry);
+    if (guestZip)   params.set('guestZip', guestZip);
+    if (guestPhone) params.set('guestPhone', guestPhone);
+    params.set('paymentMethod', String(paymentMethod));
 
     normalizedRooms.forEach((r, i) => {
-      // rooms[]
-      form.set(`rooms[${i}][roomTypeID]`, r.roomTypeID);
-      if (r.roomID) form.set(`rooms[${i}][roomID]`, r.roomID);
-      form.set(`rooms[${i}][quantity]`, String(r.quantity));
-      form.set(`rooms[${i}][rateID]`, r.rateID);
-      // include occupancy inside rooms (harmless)
-      form.set(`rooms[${i}][adults]`,   String(r.adults));
-      form.set(`rooms[${i}][children]`, String(r.children));
+      // rooms[i][...]
+      params.set(`rooms[${i}][roomTypeID]`, r.roomTypeID);
+      if (r.roomID) params.set(`rooms[${i}][roomID]`, r.roomID);
+      params.set(`rooms[${i}][quantity]`, String(r.quantity));
+      params.set(`rooms[${i}][rateID]`,   r.rateID);
 
-      // REQUIRED by Cloudbeds: top-level adults[] / children[] blocks
-      form.set(`adults[${i}][roomTypeID]`, r.roomTypeID);
-      if (r.roomID) form.set(`adults[${i}][roomID]`, r.roomID);
-      form.set(`adults[${i}][quantity]`, String(r.adults));
+      // REQUIRED top-level occupancy blocks
+      params.set(`adults[${i}][roomTypeID]`, r.roomTypeID);
+      if (r.roomID) params.set(`adults[${i}][roomID]`, r.roomID);
+      params.set(`adults[${i}][quantity]`, String(r.adults));
 
-      form.set(`children[${i}][roomTypeID]`, r.roomTypeID);
-      if (r.roomID) form.set(`children[${i}][roomID]`, r.roomID);
-      form.set(`children[${i}][quantity]`, String(r.children));
+      params.set(`children[${i}][roomTypeID]`, r.roomTypeID);
+      if (r.roomID) params.set(`children[${i}][roomID]`, r.roomID);
+      params.set(`children[${i}][quantity]`, String(r.children));
     });
 
     const endpoint = 'https://api.cloudbeds.com/api/v1.3/postReservation';
     const response = await fetch(endpoint, {
       method: 'POST',
-      headers: { 'x-api-key': API_KEY },
-      body: form
+      headers: {
+        'x-api-key': API_KEY,
+        'Content-Type': 'application/x-www-form-urlencoded'
+      },
+      body: params.toString()
     });
 
     const raw = await response.text();
@@ -132,4 +134,21 @@ export default async function handler(req, res) {
       _sentPreview: {
         propertyID,
         startDate: start, endDate: end,
-        guestFirstName, guestLastName, guestEmail
+        guestFirstName, guestLastName, guestEmail, guestCountry,
+        rooms: normalizedRooms
+      }
+    });
+
+  } catch (err) {
+    // Surface the error so you can see it in the response & Vercel logs
+    return res.status(500).json({ success: false, message: err.message, stack: err.stack });
+  }
+}
+
+// helpers
+function mustStr(v) { return (v == null ? '' : String(v)); }
+function optStr(v)  { return (v == null || v === '' ? undefined : String(v)); }
+function numOr(v, d) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : d;
+}
