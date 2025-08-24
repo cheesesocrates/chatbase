@@ -1,25 +1,25 @@
 // api/build-booking-link.js
 // One-step endpoint: validates the stay with Cloudbeds and only returns a link if valid.
-// Response shape (always HTTP 200, ALWAYS success:true):
-//   - invalid: { success:true, valid:false, reason:"..." }
-//   - valid:   { success:true, valid:true,  reason:"OK", url:"https://hotels.cloudbeds.com/..."} 
+// Response shape (always HTTP 200):
+//   - if invalid: { valid:false, reason:"..." }
+//   - if valid:   { valid:true, reason:"OK", url:"https://hotels.cloudbeds.com/..."} 
 //
 // ENV (Vercel):
 //   CLOUDBEDS_API_KEY     = cbat_...               (required)
-//   CLOUDBEDS_BOOKING_ID  = booking engine id (e.g., "svLoIs")  (required)
+//   CLOUDBEDS_BOOKING_ID  = your booking engine id (e.g., "svLoIs")  (required)
 //   CLOUDBEDS_LOCALE      = "es" | "en" | ...      (optional, default "es")
 
 export default async function handler(req, res) {
   try {
-    const API_KEY = process.env.CLOUDBEDS_API_KEY;
-    const BOOK_ID = process.env.CLOUDBEDS_BOOKING_ID;
-    const LOCALE  = process.env.CLOUDBEDS_LOCALE || 'es';
+    const API_KEY   = process.env.CLOUDBEDS_API_KEY;
+    const BOOK_ID   = process.env.CLOUDBEDS_BOOKING_ID;
+    const LOCALE    = process.env.CLOUDBEDS_LOCALE || 'es';
 
     // accept GET or POST
     const src = req.method === 'POST' ? (req.body || {}) : (req.query || {});
     const propertyID = String(src.propertyID || '198424');
     const checkin    = normDate(src.startDate || src.checkin);
-    const checkout   = normDate(src.endDate   || src.checkout);
+    const checkout   = normDate(src.endDate || src.checkout);
     const adults     = toInt(src.adults, 2);
     const children   = toInt(src.children, 0);
     const currency   = normCurrency(src.currency); // optional, 3-letter lower
@@ -99,16 +99,13 @@ export default async function handler(req, res) {
 
     const bookingUrl = `https://hotels.cloudbeds.com/${LOCALE}/reservation/${BOOK_ID}/?${urlParams.toString()}`;
 
-    return ok({ valid:true, reason:'OK', url: bookingUrl });
+    return ok({ success:true, valid:true, reason:'OK', url: bookingUrl });
 
   } catch {
     return ok({ valid:false, reason:'Error al procesar la solicitud.' });
   }
 
-  // Always 200 with success:true merged
-  function ok(body) {
-    return res.status(200).json({ success: true, ...body });
-  }
+  function ok(body) { return res.status(200).json(body); }
 }
 
 // --- helpers ---
