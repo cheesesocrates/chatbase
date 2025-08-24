@@ -1,5 +1,6 @@
 // api/build-booking-link.js
-// Chatbase-friendly: always HTTP 200, top-level fields, duplicated reason keys.
+// Chatbase-friendly: no booleans for validity, no nulls.
+// Always HTTP 200 with top-level strings: reason/message/... and url ("" if none).
 
 export default async function handler(req, res) {
   try {
@@ -16,11 +17,12 @@ export default async function handler(req, res) {
     const children   = toInt(src.children, 0);
     const currency   = normCurrency(src.currency); // optional
 
+    // Local checks
     const nights = diffDays(checkin, checkout);
-    if (!checkin || !checkout) return reply(res, false, 'Fechas inválidas: faltan check-in o check-out (YYYY-MM-DD).', null);
-    if (nights <= 0)          return reply(res, false, 'Fechas inválidas: el check-out debe ser posterior al check-in.', null);
-    if (!API_KEY)             return reply(res, false, 'Configuración del servidor faltante (API key).', null);
-    if (!BOOK_ID)             return reply(res, false, 'Falta configurar el ID del motor de reservas (bookingId).', null);
+    if (!checkin || !checkout) return reply(res, 'invalid', 'Fechas inválidas: faltan check-in o check-out (YYYY-MM-DD).', '');
+    if (nights <= 0)          return reply(res, 'invalid', 'Fechas inválidas: el check-out debe ser posterior al check-in.', '');
+    if (!API_KEY)             return reply(res, 'invalid', 'Configuración del servidor faltante (API key).', '');
+    if (!BOOK_ID)             return reply(res, 'invalid', 'Falta configurar el ID del motor de reservas (bookingId).', '');
 
     // Cloudbeds: getRatePlans (detailed)
     const url = new URL('https://api.cloudbeds.com/api/v1.3/getRatePlans');
@@ -36,13 +38,13 @@ export default async function handler(req, res) {
 
     const plans = Array.isArray(json?.data) ? json.data : [];
     if (!resp.ok || json?.success === false || plans.length === 0) {
-      return reply(res, false, 'No hay planes/tarifas disponibles para ese rango.', null);
+      return reply(res, 'invalid', 'No hay planes/tarifas disponibles para ese rango.', '');
     }
 
     const details = Array.isArray(plans[0]?.roomRateDetailed) ? plans[0].roomRateDetailed : [];
-    if (!details.length) return reply(res, false, 'No hay datos de tarifa para el rango solicitado.', null);
+    if (!details.length) return reply(res, 'invalid', 'No hay datos de tarifa para el rango solicitado.', '');
 
-    // minLos rules
+    // min stay (minLos)
     let minLos = 1;
     const arrival = details.find(d => d?.date === checkin);
     if (toInt(arrival?.minLos, 0) > 0) {
@@ -55,20 +57,20 @@ export default async function handler(req, res) {
     const lastNight  = addDays(checkout, -1);
     const windowDays = details.filter(d => d?.date >= checkin && d?.date <= lastNight);
 
-    if (windowDays.length < nights) return reply(res, false, 'No hay datos de tarifa para todas las noches solicitadas.', null);
-    if (nights < minLos)           return reply(res, false, `La estadía mínima es de ${minLos} noches.`, null);
-    if (arrival?.closedToArrival)  return reply(res, false, 'No se permite llegada en la fecha seleccionada.', null);
+    if (windowDays.length < nights) return reply(res, 'invalid', 'No hay datos de tarifa para todas las noches solicitadas.', '');
+    if (nights < minLos)           return reply(res, 'invalid', `La estadía mínima es de ${minLos} noches.`, '');
+    if (arrival?.closedToArrival)  return reply(res, 'invalid', 'No se permite llegada en la fecha seleccionada.', '');
 
     const depClosed =
       details.find(d => d?.date === checkout)?.closedToDeparture ||
       details.find(d => d?.date === lastNight)?.closedToDeparture || false;
-    if (depClosed)                  return reply(res, false, 'No se permite salida en la fecha seleccionada.', null);
+    if (depClosed)                  return reply(res, 'invalid', 'No se permite salida en la fecha seleccionada.', '');
     if (windowDays.some(d => toInt(d?.roomsAvailable, 0) === 0))
-      return reply(res, false, 'No hay disponibilidad en una o más noches.', null);
+      return reply(res, 'invalid', 'No hay disponibilidad en una o más noches.', '');
     if (windowDays.some(d => toNum(d?.rate, 0) <= 0))
-      return reply(res, false, 'No hay tarifa publicada para una o más noches.', null);
+      return reply(res, 'invalid', 'No hay tarifa publicada para una o más noches.', '');
 
-    // Build URL
+    // Build URL (valid path)
     const qs = new URLSearchParams({
       checkin, checkout,
       adults: String(adults),
@@ -77,29 +79,28 @@ export default async function handler(req, res) {
     if (currency) qs.set('currency', currency);
 
     const outUrl = `https://hotels.cloudbeds.com/${LOCALE}/reservation/${BOOK_ID}/?${qs.toString()}`;
-    return reply(res, true, 'OK', outUrl);
+    return reply(res, 'valid', 'OK', outUrl);
 
   } catch {
-    return reply(res, false, 'Error al procesar la solicitud.', null);
+    return reply(res, 'invalid', 'Error al procesar la solicitud.', '');
   }
 }
 
-// —— reply helper: duplicates reason across common keys & keeps top-level fields —— //
-function reply(res, isValid, reason, url) {
+// ——— reply helper (no booleans, no nulls; reason first; duplicate keys) ———
+function reply(res, state, reason, urlStr) {
   const payload = {
-    success: true,               // always true so Chatbase doesn’t drop it
-    // validity (use multiple forms so agent/UI can pick any)
-    valid: isValid,              // boolean
-    state: isValid ? 'valid' : 'invalid',
-    hasUrl: Boolean(url),
-    // message/description duplicates
-    reason,                      // main
-    message: reason,
-    text: reason,
-    description: reason,
-    note: reason,
-    // url (string or null)
-    url: url || null
+    // put the explanation first; Chatbase often surfaces early keys
+    reason,                         // main explanation
+    message: reason,                // common alias many UIs display
+    description: reason,            // another alias
+    error: state === 'invalid' ? reason : '',
+
+    // state & url as strings (no null/boolean)
+    state,                          // "valid" | "invalid"
+    url: String(urlStr || ''),
+
+    // keep success last; always true to avoid being dropped
+    success: true
   };
   return res
     .status(200)
@@ -107,7 +108,7 @@ function reply(res, isValid, reason, url) {
     .json(payload);
 }
 
-// —— helpers —— //
+// ——— helpers ———
 function normDate(v){ if(!v) return ''; if(typeof v==='string' && /^\d{4}-\d{2}-\d{2}/.test(v)) return v.slice(0,10); const d=new Date(v); return Number.isNaN(+d)?'':d.toISOString().slice(0,10); }
 function normCurrency(v){ if(!v) return ''; const s=String(v).trim().toLowerCase(); return /^[a-z]{3}$/.test(s)?s:''; }
 function toInt(v,d=0){ const n=parseInt(v,10); return Number.isFinite(n)?n:d; }
