@@ -1,5 +1,5 @@
 // api/build-booking-link.js
-// Returns 200 with: { success:true, url: "<link> || <link>" } OR { success:true, url: "ERROR: ..." }
+// Always 200 with: { success: true, url: "<message or links>" }
 
 export default async function handler(req, res) {
   try {
@@ -15,100 +15,63 @@ export default async function handler(req, res) {
     const ratePlanId = toStr(src.ratePlanId);
     const promoCode  = toStr(src.promoCode);
 
-    const desiredPropertyID = toStr(src.propertyID);  // prioritize this property first
-    const preferredSlot     = toStr(src.provider);    // or slot=1|2|3
+    // Selection inputs
+    const desiredPropertyID = toStr(src.propertyID);   // REQUIRED from Chatbase (no default)
+    const preferredSlot     = toStr(src.provider);     // optional override if no propertyID
     const fallback          = toBool(src.fallback, true);
 
-    if (!checkin || !checkout) return ok(res, `ERROR: Missing check-in or check-out (YYYY-MM-DD).`);
+    // Basic sanity
+    if (!checkin || !checkout)
+      return ok(res, `ERROR: Missing check-in or check-out (YYYY-MM-DD).`);
     const nights = diffDays(checkin, checkout);
-    if (nights <= 0) return ok(res, `ERROR: checkout must be after checkin`);
+    if (nights <= 0)
+      return ok(res, `ERROR: checkout must be after checkin`);
+    if (!desiredPropertyID && !preferredSlot)
+      return ok(res, `ERROR: propertyID is required (or provider=1|2|3 override).`);
 
-    const providers = orderProviders(loadProvidersFromEnv(), desiredPropertyID, preferredSlot);
-    if (!providers.length) return ok(res, `ERROR: No providers configured.`);
+    // Provider registry (three properties; booking links fixed per your mapping)
+    const allProviders = loadProvidersFromEnv();
+    if (!allProviders.length)
+      return ok(res, `ERROR: No providers configured (missing API keys).`);
 
-    const foundLinks = [];
-    const attempts   = [];
+    // Order so desired property is first; if not given, use provider slot; else natural order
+    const ordered = orderProviders(allProviders, desiredPropertyID, preferredSlot);
+    const desired = ordered[0];
+    const others  = ordered.slice(1);
 
-    for (const p of providers) {
-      const attempt = { name: p.name, reason: '' };
-      attempts.push(attempt);
+    // 1) Try desired ONLY
+    const desiredResult = await tryProvider({
+      provider: desired,
+      propertyID: desiredPropertyID || desired.propertyID, // prefer request value when present
+      checkin, checkout, adults, children, currency, roomTypeId, ratePlanId, promoCode
+    });
 
-      if (!p.apiKey)     { attempt.reason = 'Missing API key';      if (!fallback) break; else continue; }
-      if (!p.propertyID) { attempt.reason = 'Missing property ID';  if (!fallback) break; else continue; }
-      if (!p.bookingBase){ attempt.reason = 'Missing booking link'; if (!fallback) break; else continue; }
-
-      // Cloudbeds: getRatePlans
-      const url = new URL(`${p.apiBase}/getRatePlans`);
-      url.searchParams.set('propertyID', p.propertyID);
-      url.searchParams.set('startDate',  checkin);
-      url.searchParams.set('endDate',    checkout);
-      url.searchParams.set('adults',     String(adults));
-      url.searchParams.set('children',   String(children));
-      url.searchParams.set('detailedRates', 'true');
-      if (promoCode) url.searchParams.set('promoCode', promoCode);
-
-      let json = null;
-      try {
-        const resp = await fetch(url.toString(), { headers: { 'x-api-key': p.apiKey } });
-        json = await resp.json().catch(() => ({}));
-        if (!resp.ok || json?.success === false) {
-          attempt.reason = json?.message || `Cloudbeds HTTP ${resp.status}`;
-          if (!fallback) break; else continue;
-        }
-      } catch (e) {
-        attempt.reason = `Fetch error`;
-        if (!fallback) break; else continue;
-      }
-
-      const plans = Array.isArray(json?.data) ? json.data : [];
-      if (plans.length === 0) {
-        attempt.reason = 'No plans found';
-        if (!fallback) break; else continue;
-      }
-
-      // Optional filters
-      const filtered = plans
-        .filter(pl => (!ratePlanId || String(pl?.ratePlanId) === ratePlanId))
-        .map(pl => ({ ...pl, details: Array.isArray(pl?.roomRateDetailed) ? pl.roomRateDetailed : [] }))
-        .filter(pl => !roomTypeId || hasRoomType(pl, roomTypeId));
-
-      if (!filtered.length) { attempt.reason = 'No matching room/rate plan'; if (!fallback) break; else continue; }
-
-      // Validate stay rules
-      const candidate = filtered[0];
-      const details   = candidate.details;
-      const lastNight = addDays(checkin, nights - 1);
-      const window    = details.filter(d => d?.date >= checkin && d?.date <= lastNight);
-
-      if (window.length < nights) { attempt.reason = 'Missing nightly rates'; if (!fallback) break; else continue; }
-      const arrival = details.find(d => d?.date === checkin);
-      const minLos  = inferMinLos(details, arrival);
-      if (nights < minLos) { attempt.reason = `Minimum stay ${minLos}`; if (!fallback) break; else continue; }
-      if (arrival?.closedToArrival) { attempt.reason = 'Closed to arrival'; if (!fallback) break; else continue; }
-      const depClosed = details.find(d => d?.date === checkout)?.closedToDeparture ||
-                        details.find(d => d?.date === lastNight)?.closedToDeparture || false;
-      if (depClosed) { attempt.reason = 'Closed to departure'; if (!fallback) break; else continue; }
-      if (window.some(d => toInt(d?.roomsAvailable,0) === 0)) { attempt.reason = 'No availability'; if (!fallback) break; else continue; }
-      if (window.some(d => toNum(d?.rate,0) <= 0)) { attempt.reason = 'No published rate'; if (!fallback) break; else continue; }
-
-      // SUCCESS → add booking link
-      const qs = new URLSearchParams({
-        checkin, checkout,
-        adults: String(adults),
-        children: String(children),
-      });
-      if (currency)   qs.set('currency',  currency);
-      if (roomTypeId) qs.set('roomTypeId', roomTypeId);
-      if (ratePlanId) qs.set('ratePlanId', ratePlanId);
-      if (promoCode)  qs.set('promoCode',  promoCode);
-
-      foundLinks.push(`${p.bookingBase}?${qs.toString()}`);
+    if (desiredResult.ok) {
+      // success → return single labeled link for desired property only
+      return ok(res, `[${desired.name}] ${desiredResult.link}`);
     }
 
-    if (foundLinks.length) return ok(res, foundLinks.join(' || '));
+    // 2) Desired unavailable → include reason, then try the other two (if fallback)
+    const reason = desiredResult.reason || 'Unavailable';
+    const altLinks = [];
 
-    const reason = attempts.map(a => `${a.name}: ${a.reason || 'failed'}`).join(' | ');
-    return ok(res, `ERROR: ${reason}`);
+    if (fallback && others.length) {
+      for (const p of others) {
+        const r = await tryProvider({
+          provider: p,
+          propertyID: p.propertyID, // their own property ID from env
+          checkin, checkout, adults, children, currency, roomTypeId, ratePlanId, promoCode
+        });
+        if (r.ok) altLinks.push(`[${p.name}] ${r.link}`);
+      }
+    }
+
+    if (altLinks.length) {
+      return ok(res, `Desired property unavailable: ${reason} || Alternatives: ${altLinks.join(' || ')}`);
+    }
+
+    // 3) Nothing available anywhere
+    return ok(res, `ERROR: No availability found for the desired property (${desired.name}) — ${reason}. No alternatives available for your dates.`);
 
   } catch (e) {
     console.error('build-booking-link error:', e);
@@ -116,37 +79,111 @@ export default async function handler(req, res) {
   }
 }
 
-/* --- Providers: STYLE, COLONIAL, ALTOS --- */
+/* ---------- provider attempt ---------- */
+async function tryProvider({ provider: p, propertyID, checkin, checkout, adults, children, currency, roomTypeId, ratePlanId, promoCode }) {
+  // Config checks
+  if (!p?.apiKey)      return { ok:false, reason:'Missing API key' };
+  if (!propertyID)     return { ok:false, reason:'Missing property ID' };
+  if (!p?.bookingBase) return { ok:false, reason:'Missing booking link' };
+
+  // Cloudbeds getRatePlans v1.3
+  const url = new URL(`${p.apiBase}/getRatePlans`);
+  url.searchParams.set('propertyID', propertyID);
+  url.searchParams.set('startDate',  checkin);
+  url.searchParams.set('endDate',    checkout);
+  url.searchParams.set('adults',     String(adults));
+  url.searchParams.set('children',   String(children));
+  url.searchParams.set('detailedRates', 'true');
+  if (promoCode) url.searchParams.set('promoCode', promoCode);
+
+  let json = null;
+  try {
+    const resp = await fetch(url.toString(), { headers: { 'x-api-key': p.apiKey } });
+    json = await resp.json().catch(() => ({}));
+    if (!resp.ok || json?.success === false) {
+      return { ok:false, reason: json?.message || `Cloudbeds HTTP ${resp.status}` };
+    }
+  } catch {
+    return { ok:false, reason:'Network error contacting provider' };
+  }
+
+  const plans = Array.isArray(json?.data) ? json.data : [];
+  if (!plans.length) return { ok:false, reason:'No plans found' };
+
+  // Optional filters
+  const filtered = plans
+    .filter(pl => (!ratePlanId || String(pl?.ratePlanId) === ratePlanId))
+    .map(pl => ({ ...pl, details: Array.isArray(pl?.roomRateDetailed) ? pl.roomRateDetailed : [] }))
+    .filter(pl => !roomTypeId || hasRoomType(pl, roomTypeId));
+
+  if (!filtered.length) return { ok:false, reason:'No matching room/rate plan' };
+
+  // Validate window
+  const nights = diffDays(checkin, checkout);
+  const candidate = filtered[0];
+  const details   = candidate.details;
+  const lastNight = addDays(checkin, nights - 1);
+  const window    = details.filter(d => d?.date >= checkin && d?.date <= lastNight);
+
+  if (window.length < nights) return { ok:false, reason:'Missing nightly rates across window' };
+  const arrival = details.find(d => d?.date === checkin);
+  const minLos  = inferMinLos(details, arrival);
+  if (nights < minLos) return { ok:false, reason:`Minimum stay is ${minLos} nights` };
+  if (arrival?.closedToArrival) return { ok:false, reason:'Closed to arrival' };
+  const depClosed =
+    details.find(d => d?.date === checkout)?.closedToDeparture ||
+    details.find(d => d?.date === lastNight)?.closedToDeparture || false;
+  if (depClosed) return { ok:false, reason:'Closed to departure' };
+  if (window.some(d => toInt(d?.roomsAvailable, 0) === 0)) return { ok:false, reason:'No availability on one or more nights' };
+  if (window.some(d => toNum(d?.rate, 0) <= 0))            return { ok:false, reason:'No published rate on one or more nights' };
+
+  // Success → produce link
+  const qs = new URLSearchParams({
+    checkin, checkout,
+    adults: String(adults),
+    children: String(children),
+  });
+  if (currency)   qs.set('currency',  currency);
+  if (roomTypeId) qs.set('roomTypeId', roomTypeId);
+  if (ratePlanId) qs.set('ratePlanId', ratePlanId);
+  if (promoCode)  qs.set('promoCode',  promoCode);
+
+  return { ok:true, link: `${p.bookingBase}?${qs.toString()}` };
+}
+
+/* ---------- providers: STYLE (1), COLONIAL (2), ALTOS (3) ---------- */
 function loadProvidersFromEnv() {
   return [
     {
       slot: '1',
       name: 'STYLE',
-      apiKey:     process.env.CLOUDBEDS_API_KEY      || '',
-      propertyID: process.env.CLOUDBEDS_PROPERTY_ID  || '',
-      bookingBase:'https://hotels.cloudbeds.com/es/reservation/svLoIs',
-      apiBase:    process.env.CLOUDBEDS_API_BASE     || 'https://api.cloudbeds.com/api/v1.3',
+      apiKey:   process.env.CLOUDBEDS_API_KEY      || '',
+      apiBase:  process.env.CLOUDBEDS_API_BASE     || 'https://api.cloudbeds.com/api/v1.3',
+      bookingBase: 'https://hotels.cloudbeds.com/es/reservation/svLoIs',
+      // propertyID comes from request when STYLE is the desired property
+      // (alternates use their own env property IDs below)
+      propertyID: process.env.CLOUDBEDS_PROPERTY_ID || '', // optional; used when STYLE is tried as alternate
     },
     {
       slot: '2',
       name: 'COLONIAL',
-      apiKey:     process.env.CLOUDBEDS_API_KEY_2     || '',
+      apiKey:   process.env.CLOUDBEDS_API_KEY_2     || '',
+      apiBase:  process.env.CLOUDBEDS_API_BASE_2    || process.env.CLOUDBEDS_API_BASE || 'https://api.cloudbeds.com/api/v1.3',
+      bookingBase: 'https://hotels.cloudbeds.com/es/reservation/3atiWS',
       propertyID: process.env.CLOUDBEDS_PROPERTY_ID_2 || '',
-      bookingBase:'https://hotels.cloudbeds.com/es/reservation/3atiWS',
-      apiBase:    process.env.CLOUDBEDS_API_BASE_2    || process.env.CLOUDBEDS_API_BASE || 'https://api.cloudbeds.com/api/v1.3',
     },
     {
       slot: '3',
       name: 'ALTOS DE LA VIUDA',
-      apiKey:     process.env.CLOUDBEDS_API_KEY_3     || '',
+      apiKey:   process.env.CLOUDBEDS_API_KEY_3     || '',
+      apiBase:  process.env.CLOUDBEDS_API_BASE_3    || process.env.CLOUDBEDS_API_BASE || 'https://api.cloudbeds.com/api/v1.3',
+      bookingBase: 'https://hotels.cloudbeds.com/reservation/AwNrlI',
       propertyID: process.env.CLOUDBEDS_PROPERTY_ID_3 || '',
-      bookingBase:'https://hotels.cloudbeds.com/reservation/AwNrlI',
-      apiBase:    process.env.CLOUDBEDS_API_BASE_3    || process.env.CLOUDBEDS_API_BASE || 'https://api.cloudbeds.com/api/v1.3',
     },
-  ].filter(p => p.apiKey || p.propertyID || p.bookingBase);
+  ].filter(p => p.apiKey); // require at least API key configured
 }
 
-/* --- helpers (same as before) --- */
+/* ---------- ordering helpers ---------- */
 function orderProviders(arr, desiredPropertyID, preferredSlot) {
   let out = [...arr];
   if (desiredPropertyID) {
@@ -158,6 +195,8 @@ function orderProviders(arr, desiredPropertyID, preferredSlot) {
   }
   return out;
 }
+
+/* ---------- shared utils ---------- */
 function ok(res, urlStr){ return res.status(200).json({ success:true, url:String(urlStr||'') }); }
 function toStr(v){ return (v==null ? '' : String(v).trim()) || ''; }
 function toBool(v, d=false){ if(v==null) return d; const s=String(v).toLowerCase(); return ['1','true','yes','y','on'].includes(s); }
