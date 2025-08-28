@@ -3,11 +3,11 @@ export default async function handler(req, res) {
     res.setHeader('Cache-Control', 'no-store');
 
     const src = req.method === 'POST' ? (req.body || {}) : (req.query || {});
-    const checkin   = normDate(src.startDate || src.checkin);
-    const checkout  = normDate(src.endDate   || src.checkout);
-    const adults    = toInt(src.adults, 2);
-    const children  = toInt(src.children, 0);
-    const currency  = normCurrency(src.currency);
+    const checkin    = normDate(src.startDate || src.checkin);
+    const checkout   = normDate(src.endDate   || src.checkout);
+    const adults     = toInt(src.adults, 2);
+    const children   = toInt(src.children, 0);
+    const currency   = normCurrency(src.currency);
     const roomTypeId = toStr(src.roomTypeId);
     const ratePlanId = toStr(src.ratePlanId);
     const promoCode  = toStr(src.promoCode);
@@ -27,7 +27,7 @@ export default async function handler(req, res) {
     const attempts   = [];
 
     for (const p of providers) {
-      const attempt = { slot: p.slot, reason: '' };
+      const attempt = { name: p.name, reason: '' };
       attempts.push(attempt);
 
       if (!p.apiKey)     { attempt.reason = 'Missing API key';      if (!fallback) break; else continue; }
@@ -80,34 +80,46 @@ export default async function handler(req, res) {
       if (ratePlanId) qs.set('ratePlanId', ratePlanId);
       if (promoCode)  qs.set('promoCode', promoCode);
 
-      foundLinks.push(`https://hotels.cloudbeds.com/${p.locale}/reservation/${p.bookingId}/?${qs}`);
+      foundLinks.push(`${p.bookingBase}?${qs.toString()}`);
     }
 
     if (foundLinks.length) return ok(res, foundLinks.join(' || '));
 
-    const reason = attempts.map(a => `slot${a.slot}: ${a.reason||'failed'}`).join(' | ');
+    const reason = attempts.map(a => `${a.name}: ${a.reason||'failed'}`).join(' | ');
     return ok(res, `ERROR: ${reason}`);
 
   } catch { return ok(res, `ERROR: Unexpected server error.`); }
 }
 
-/* --- helpers --- */
+/* --- Provider config --- */
 function loadProvidersFromEnv(){
   return [
-    { slot:'1', apiKey:process.env.CLOUDBEDS_API_KEY||'', propertyID:process.env.CLOUDBEDS_PROPERTY_ID||'', bookingId:process.env.CLOUDBEDS_BOOKING_ID||'', locale:process.env.CLOUDBEDS_LOCALE||'es', apiBase:process.env.CLOUDBEDS_API_BASE||'https://api.cloudbeds.com/api/v1.3'},
-    { slot:'2', apiKey:process.env.CLOUDBEDS_API_KEY_2||'', propertyID:process.env.CLOUDBEDS_PROPERTY_ID_2||'', bookingId:process.env.CLOUDBEDS_BOOKING_ID_2||process.env.CLOUDBEDS_BOOKING_ID||'', locale:process.env.CLOUDBEDS_LOCALE_2||process.env.CLOUDBEDS_LOCALE||'es', apiBase:process.env.CLOUDBEDS_API_BASE_2||process.env.CLOUDBEDS_API_BASE||'https://api.cloudbeds.com/api/v1.3'},
-    { slot:'3', apiKey:process.env.CLOUDBEDS_API_KEY_3||'', propertyID:process.env.CLOUDBEDS_PROPERTY_ID_3||'', bookingId:process.env.CLOUDBEDS_BOOKING_ID_3||process.env.CLOUDBEDS_BOOKING_ID||'', locale:process.env.CLOUDBEDS_LOCALE_3||process.env.CLOUDBEDS_LOCALE||'es', apiBase:process.env.CLOUDBEDS_API_BASE_3||process.env.CLOUDBEDS_API_BASE||'https://api.cloudbeds.com/api/v1.3'},
-  ].filter(p=>p.apiKey||p.propertyID||p.bookingId);
+    {
+      slot:'1',
+      name:'COLONIAL',
+      apiKey:process.env.CLOUDBEDS_API_KEY||'',
+      propertyID:process.env.CLOUDBEDS_PROPERTY_ID||'',
+      bookingId:process.env.CLOUDBEDS_BOOKING_ID||'',
+      apiBase:process.env.CLOUDBEDS_API_BASE||'https://api.cloudbeds.com/api/v1.3',
+      bookingBase:'https://hotels.cloudbeds.com/es/reservation/3atiWS'
+    },
+    {
+      slot:'2',
+      name:'ALTOS DE LA VIUDA',
+      apiKey:process.env.CLOUDBEDS_API_KEY_2||'',
+      propertyID:process.env.CLOUDBEDS_PROPERTY_ID_2||'',
+      bookingId:process.env.CLOUDBEDS_BOOKING_ID_2||'',
+      apiBase:process.env.CLOUDBEDS_API_BASE_2||process.env.CLOUDBEDS_API_BASE||'https://api.cloudbeds.com/api/v1.3',
+      bookingBase:'https://hotels.cloudbeds.com/reservation/AwNrlI'
+    },
+    {
+      slot:'3',
+      name:'THIRD',
+      apiKey:process.env.CLOUDBEDS_API_KEY_3||'',
+      propertyID:process.env.CLOUDBEDS_PROPERTY_ID_3||'',
+      bookingId:process.env.CLOUDBEDS_BOOKING_ID_3||'',
+      apiBase:process.env.CLOUDBEDS_API_BASE_3||process.env.CLOUDBEDS_API_BASE||'https://api.cloudbeds.com/api/v1.3',
+      bookingBase:'https://hotels.cloudbeds.com/es/reservation/XXXXX' // replace with actual third link
+    }
+  ].filter(p=>p.apiKey||p.propertyID);
 }
-function orderProviders(arr, propertyID, slot){ let out=[...arr]; if(propertyID){const h=out.find(p=>p.propertyID===propertyID); if(h) out=[h,...out.filter(p=>p!==h)];} else if(slot){const h=out.find(p=>p.slot===slot); if(h) out=[h,...out.filter(p=>p!==h)];} return out;}
-function ok(res,str){return res.status(200).json({success:true,url:String(str)});}
-function toStr(v){return(v==null?'':String(v).trim())||'';}
-function toBool(v,d=false){if(v==null)return d;const s=String(v).toLowerCase();return['1','true','yes','y','on'].includes(s);}
-function normDate(v){if(!v)return'';if(/^\\d{4}-\\d{2}-\\d{2}/.test(v))return v.slice(0,10);const d=new Date(v);return Number.isNaN(+d)?'':d.toISOString().slice(0,10);}
-function normCurrency(v){if(!v)return'';const s=String(v).trim().toLowerCase();return/^[a-z]{3}$/.test(s)?s:'';}
-function toInt(v,d=0){const n=parseInt(v,10);return Number.isFinite(n)?n:d;}
-function toNum(v,d=0){if(v==null)return d;const n=Number(String(v).replace(',','.'));return Number.isFinite(n)?n:d;}
-function diffDays(a,b){return Math.ceil((new Date(b+'T00:00:00Z')-new Date(a+'T00:00:00Z'))/86400000);}
-function addDays(dy,ds){const d=new Date(dy+'T00:00:00Z');d.setUTCDate(d.getUTCDate()+ds);return d.toISOString().slice(0,10);}
-function hasRoomType(pl,id){if(String(pl?.roomTypeId||'')===String(id))return true;return (pl.roomRateDetailed||[]).some(d=>String(d?.roomTypeId||'')===String(id));}
-function inferMinLos(det,arr){if(toInt(arr?.minLos,0)>0)return toInt(arr.minLos,1);const mins=det.map(d=>toInt(d?.minLos,0)).filter(n=>n>0);return mins.length?Math.max(...mins):1;}
