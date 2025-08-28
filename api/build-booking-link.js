@@ -143,11 +143,10 @@ function loadProvidersFromEnv() {
     },
     {
       slot: '3',
-      name: 'THIRD',
+      name: 'STYLE',
       apiKey:     process.env.CLOUDBEDS_API_KEY_3     || '',
       propertyID: process.env.CLOUDBEDS_PROPERTY_ID_3 || '',
-      // TODO: replace with your third property’s booking URL
-      bookingBase:'https://hotels.cloudbeds.com/es/reservation/XXXXX',
+      bookingBase:'https://hotels.cloudbeds.com/es/reservation/svLoIs',
       apiBase:    process.env.CLOUDBEDS_API_BASE_3    || process.env.CLOUDBEDS_API_BASE || 'https://api.cloudbeds.com/api/v1.3',
     },
   ].filter(p => p.apiKey || p.propertyID || p.bookingBase);
