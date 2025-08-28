@@ -119,7 +119,7 @@ function loadProvidersFromEnv(){
       propertyID:process.env.CLOUDBEDS_PROPERTY_ID_3||'',
       bookingId:process.env.CLOUDBEDS_BOOKING_ID_3||'',
       apiBase:process.env.CLOUDBEDS_API_BASE_3||process.env.CLOUDBEDS_API_BASE||'https://api.cloudbeds.com/api/v1.3',
-      bookingBase:'https://hotels.cloudbeds.com/es/reservation/XXXXX' // replace with actual third link
+      bookingBase:'https://hotels.cloudbeds.com/es/reservation/svLoIs' // replace with actual third link
     }
   ].filter(p=>p.apiKey||p.propertyID);
 }
