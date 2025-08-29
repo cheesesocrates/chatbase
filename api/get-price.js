@@ -1,39 +1,26 @@
 // api/get-price.js
-// Returns the total price for a SPECIFIC room type in the requested property.
-// Response (200):
-//   { success: true, propertyID, startDate, endDate, nights,
-//     roomTypeMatched: { id, name },
-//     totalPrice, currency: "USD" }
+// Returns ONLY the total price for the requested room type in the requested property.
 
 export default async function handler(req, res) {
   try {
     const src = req.method === 'POST' ? (req.body || {}) : (req.query || {});
 
-    // REQUIRED inputs
-    const propertyID = toStr(src.propertyID); // e.g., "198425"
+    const propertyID = toStr(src.propertyID);
     const startDate  = normDate(src.startDate || src.checkin);
     const endDate    = normDate(src.endDate   || src.checkout);
-
-    // Optional inputs
-    const adults     = toInt(src.adults,   2);
+    const adults     = toInt(src.adults, 2);
     const children   = toInt(src.children, 0);
-    const ratePlanId = toStr(src.ratePlanId); // optional filter
+    const ratePlanId = toStr(src.ratePlanId);
+    const roomTypeNameQ = toStr(src.roomTypeName || src.roomType || src.room);
+    const roomTypeIDQ   = toStr(src.roomTypeID);
 
-    // Room selection
-    const roomTypeNameQ = toStr(src.roomTypeName || src.roomType || src.room); // e.g., "QUADRUPLE"
-    const roomTypeIDQ   = toStr(src.roomTypeID); // e.g., "346985"
-
-    // Basic validation
-    if (!propertyID) return bad(res, 'propertyID required');
-    if (!startDate || !endDate) return bad(res, 'startDate and endDate required (YYYY-MM-DD)');
+    if (!propertyID || !startDate || !endDate) return only(res, 0);
     const nights = diffDays(startDate, endDate);
-    if (nights <= 0) return bad(res, 'checkout must be after checkin');
+    if (nights <= 0) return only(res, 0);
 
-    // Figure out provider config (auth + base) from propertyID
     const provider = getProviderForProperty(propertyID);
-    if (!provider) return bad(res, `Unknown propertyID ${propertyID}. Configure provider mapping.`);
+    if (!provider) return only(res, 0);
 
-    // Build endpoint
     const url = new URL(`${provider.apiBase}/getRatePlans`);
     if (needsPropertyParam(provider)) url.searchParams.set('propertyID', propertyID);
     url.searchParams.set('startDate', startDate);
@@ -46,36 +33,21 @@ export default async function handler(req, res) {
     const r = await fetch(url.toString(), { headers });
     const j = await r.json().catch(() => ({}));
 
-    if (!r.ok || j?.success === false) {
-      return bad(res, j?.message || `Cloudbeds error ${r.status}`);
-    }
+    if (!r.ok || j?.success === false) return only(res, 0);
 
     const plans = Array.isArray(j?.data) ? j.data : [];
-    if (!plans.length) {
-      return ok(res, {
-        success: true, propertyID, startDate, endDate, nights,
-        roomTypeMatched: null, totalPrice: 0, currency: 'USD'
-      });
-    }
+    if (!plans.length) return only(res, 0);
 
-    // 1) Filter to desired room type
     const candidates = filterByRoomType(plans, { roomTypeNameQ, roomTypeIDQ, ratePlanId });
+    if (!candidates.length) return only(res, 0);
 
-    if (!candidates.length) {
-      const wanted = roomTypeNameQ || roomTypeIDQ || '(room type not specified)';
-      return bad(res, `Room type not found or not available: ${wanted}`);
-    }
-
-    // 2) Validate availability + compute price
     const scored = candidates.map(pl => {
       const score = scoreRoomMatch(pl, { roomTypeNameQ, roomTypeIDQ });
       const total = computeWindowTotal(pl, startDate, endDate);
       return { plan: pl, score, total };
     }).filter(x => x.total.ok);
 
-    if (!scored.length) {
-      return bad(res, 'No valid rates across the requested window (min stay/closures/availability).');
-    }
+    if (!scored.length) return only(res, 0);
 
     scored.sort((a, b) => {
       if (b.score !== a.score) return b.score - a.score;
@@ -83,45 +55,23 @@ export default async function handler(req, res) {
     });
 
     const best = scored[0];
-    const totalPrice = best.total.amount;
+    return only(res, best.total.amount);
 
-    return ok(res, {
-      success: true,
-      propertyID,
-      startDate,
-      endDate,
-      nights,
-      roomTypeMatched: {
-        id: toStr(best.plan?.roomTypeID),
-        name: toStr(best.plan?.roomTypeName)
-      },
-      totalPrice,
-      currency: 'USD'
-    });
-
-  } catch (e) {
-    return res.status(200).json({ success: false, message: e.message || 'Unexpected server error' });
+  } catch {
+    return only(res, 0);
   }
 }
 
-/* ---------------- provider mapping ---------------- */
+/* ---------- utils ---------- */
+function only(res, amount) {
+  return res.status(200).json({ totalPrice: amount });
+}
+
 function getProviderForProperty(propertyID) {
   const map = {
-    '198424': { // STYLE
-      name: 'STYLE',
-      apiBase: process.env.CLOUDBEDS_API_BASE || 'https://api.cloudbeds.com/api/v1.2',
-      apiKey:  process.env.CLOUDBEDS_API_KEY  || '',
-    },
-    '198425': { // COLONIAL
-      name: 'COLONIAL',
-      apiBase: process.env.CLOUDBEDS_API_BASE_2 || process.env.CLOUDBEDS_API_BASE || 'https://api.cloudbeds.com/api/v1.3',
-      apiKey:  process.env.CLOUDBEDS_API_KEY_2  || '',
-    },
-    '303475': { // ALTOS
-      name: 'ALTOS DE LA VIUDA',
-      apiBase: process.env.CLOUDBEDS_API_BASE_3 || process.env.CLOUDBEDS_API_BASE || 'https://api.cloudbeds.com/api/v1.2',
-      apiKey:  process.env.CLOUDBEDS_API_KEY_3  || '',
-    },
+    '198424': { apiBase: 'https://api.cloudbeds.com/api/v1.2', apiKey: process.env.CLOUDBEDS_API_KEY  || '' },
+    '198425': { apiBase: 'https://api.cloudbeds.com/api/v1.3', apiKey: process.env.CLOUDBEDS_API_KEY_2 || '' },
+    '303475': { apiBase: 'https://api.cloudbeds.com/api/v1.2', apiKey: process.env.CLOUDBEDS_API_KEY_3 || '' },
   };
   const p = map[String(propertyID)];
   if (!p) return null;
@@ -137,7 +87,6 @@ function buildAuthHeaders(provider) {
 }
 function needsPropertyParam(provider) { return true; }
 
-/* ---------------- room filtering ---------------- */
 function filterByRoomType(plans, { roomTypeNameQ, roomTypeIDQ, ratePlanId }) {
   const normQ = normalize(roomTypeNameQ);
   return plans.filter(pl => {
@@ -160,7 +109,6 @@ function scoreRoomMatch(plan, { roomTypeNameQ, roomTypeIDQ }) {
   return 0;
 }
 
-/* ---------------- pricing ---------------- */
 function computeWindowTotal(plan, startDate, endDate) {
   const nights = diffDays(startDate, endDate);
   const details = Array.isArray(plan?.roomRateDetailed) ? plan.roomRateDetailed : [];
@@ -189,10 +137,7 @@ function computeWindowTotal(plan, startDate, endDate) {
   return { ok:true, amount };
 }
 
-/* ---------------- utils ---------------- */
-function ok(res, payload){ return res.status(200).json(payload); }
-function bad(res, message){ return res.status(200).json({ success:false, message }); }
-
+/* ---------- small helpers ---------- */
 function toStr(v){ return (v==null ? '' : String(v).trim()) || ''; }
 function normDate(v){ if(!v) return ''; if(/^\d{4}-\d{2}-\d{2}/.test(v)) return v.slice(0,10); const d=new Date(v); return Number.isNaN(+d)?'':d.toISOString().slice(0,10); }
 function toInt(v,d=0){ const n=parseInt(v,10); return Number.isFinite(n)?n:d; }
